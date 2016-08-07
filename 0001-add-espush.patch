@@ -1,0 +1,654 @@
+From cb9a8220ed57a47c445e258bb554242595f92dad Mon Sep 17 00:00:00 2001
+From: espush <webmaster@espush.cn>
+Date: Sun, 7 Aug 2016 11:35:19 +0800
+Subject: [PATCH] add espush.
+
+---
+ app/Makefile               |   1 +
+ app/include/espush.h       | 279 +++++++++++++++++++++++++++++++++++++++
+ app/include/user_modules.h |   2 +
+ app/modules/espush.c       | 322 +++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 604 insertions(+)
+ create mode 100644 app/include/espush.h
+ create mode 100644 app/modules/espush.c
+
+diff --git a/app/Makefile b/app/Makefile
+index 1051145..a7fd5b2 100644
+--- a/app/Makefile
++++ b/app/Makefile
+@@ -117,6 +117,7 @@ LINKFLAGS_eagle.app.v6 = 			\
+ 	-lwpa2					\
+ 	-lmain 					\
+ 	-lsmartconfig 				\
++	-lespush				\
+ 	-lssl 					\
+ 	-lcrypto				\
+ 	$(DEP_LIBS_eagle.app.v6) 		\
+diff --git a/app/include/espush.h b/app/include/espush.h
+new file mode 100644
+index 0000000..fc5a7aa
+--- /dev/null
++++ b/app/include/espush.h
+@@ -0,0 +1,279 @@
++/*
++ * driver.h
++ *
++ *  Created on: 2015年5月16日
++ *      Author: Sunday
++ */
++
++#ifndef APP_INCLUDE_PUSH_H_
++#define APP_INCLUDE_PUSH_H_
++
++#include <c_types.h>
++
++#ifndef ICACHE_FLASH_ATTR
++#define ICACHE_FLASH_ATTR
++#endif
++/*
++ * 大小端转换，ESP8266属小端序，协议规定为大端序（主要为方便服务端开发）
++ */
++#define my_htons(_n)  ((int16_t)((((_n) & 0xff) << 8) | (((_n) >> 8) & 0xff)))
++#define my_ntohs(_n)  ((int16_t)((((_n) & 0xff) << 8) | (((_n) >> 8) & 0xff)))
++#define my_htonl(_n)  ((int32_t)( (((_n) & 0xff) << 24) | (((_n) & 0xff00) << 8) | (((_n) >> 8)  & 0xff00) | (((_n) >> 24) & 0xff) ))
++#define my_ntohl(_n)  ((int32_t)( (((_n) & 0xff) << 24) | (((_n) & 0xff00) << 8) | (((_n) >> 8)  & 0xff00) | (((_n) >> 24) & 0xff) ))
++
++
++#define read_u32(x) my_htonl(x)
++#define read_u16(x) my_htons(x)
++
++#define write_u32(x) my_ntohl(x)
++#define write_u16(x) my_ntohs(x)
++
++/*
++ * 客户端能力值，int8_t型，不得设置值超过255，否则无效。
++ * 建议使用下表常量值，可使用VER_UNKNOWN
++ */
++enum VERTYPE {
++	VER_UNKNOWN = 0,
++	VER_AT = 1,
++	VER_NODEMCU = 2,
++	VER_SDK = 3,
++	VER_OTHER = 4,
++	VER_AT_PLUS = 5,
++};
++
++/*
++ * UUID
++ */
++typedef struct {
++	int8_t _buf[16];
++} UUID;
++void ICACHE_FLASH_ATTR uuid_to_string(UUID* puuid, char buf[32]);
++void ICACHE_FLASH_ATTR create_uuid(UUID* puuid);
++void ICACHE_FLASH_ATTR show_uuid(UUID* puuid);
++
++/*
++ * 数据回调, pdata为网络数据缓冲区，len为数据长度，回调函数在收到网络数据后被异步调用。
++ * 目前平台只有在推送文本数据或二进制数据时，此回调才有可能被调用；
++ * 远端指令推送不会调用此回调；
++ */
++typedef void(*msg_cb)(int8_t* pdata, int32_t len);
++
++/*
++ * AT指令远程执行回调, 收到AT指令后目前是同步执行
++ */
++typedef void(*atcmd_cb)(int8_t* atcmd, int32_t len);
++void ICACHE_FLASH_ATTR espush_atcmd_cb(atcmd_cb func);
++
++/*
++ * Lua远程执行回调
++ */
++typedef void(*luafile_cb)(int8_t* filebuf, int32_t len);
++void ICACHE_FLASH_ATTR espush_luafile_cb(luafile_cb func);
++
++
++/*
++ * 串口透传
++ * */
++typedef void(*uart_stream_cb)(char* streamIn);
++void ICACHE_FLASH_ATTR espush_uart_stream_cb(uart_stream_cb func);
++
++
++/*
++ * 连接成功、断开或失败时的回调函数
++ * */
++enum ESPUSH_CONNECT_EVENT {
++	CONNECTED_CB = 0,
++	DISCONNECTED_CB
++};
++typedef void(*espush_connect_event_cb)(enum ESPUSH_CONNECT_EVENT);
++void ICACHE_FLASH_ATTR espush_set_connect_event_cb(espush_connect_event_cb cbfunc);
++/*
++ * 实时状态获取回调
++ * 使用 espush_rtstatus_cb 注册一个 实时状态回调
++ * 云端调用对应API时，回调被调用，在回调函数末尾，必须调用 espush_rtstatus_ret_to_gateway 进行返回
++ * espush_rtstatus_ret_to_gateway 函数的取值 cur_msgid为 回调函数对应参数；
++ * buf与length为 回调结果，返回后云端API接口会得到对应值；
++ */
++typedef void(*rt_status_cb)(int32_t msgid, char* key, int16_t length);
++void ICACHE_FLASH_ATTR espush_rtstatus_cb(rt_status_cb func);
++void ICACHE_FLASH_ATTR espush_rtstatus_ret_to_gateway(int32_t cur_msgid, const char* buf, int8_t length);
++void ICACHE_FLASH_ATTR espush_return_to_gateway(int16_t msgtype, int32_t cur_msgid, int8_t opr_type, const char* buf, int8_t length);
++
++/*
++ * 自定义指令类型与回调函数，暂时为内部使用，无需调用。
++ * */
++typedef void(*custom_msg_cb)(int32_t cur_msgid, int8_t msgtype, int16_t length, int8_t* buf);
++void ICACHE_FLASH_ATTR espush_custom_msg_cb(custom_msg_cb func);
++
++/*
++ * appid 与 appkey为平台申请值
++ * devid 为设备唯一标志码，32字节，可使用uuid自动生成，平台暂未使用。
++ */
++typedef struct push_config_t {
++	int32_t appid;
++	int8_t appkey[32];
++	int8_t devid[32];
++	enum VERTYPE vertype;
++	msg_cb msgcb;
++}push_config;
++
++
++/*
++ * 保存appid、appkey、devid等信息
++ * 因为flash的特性，未读写过的空间里也是有内容的
++ * 所以需要设置一个hash校验
++ * 若校验通过则证明是人工写入的
++ */
++#define APPKEY_LENGTH 32
++#define DEVID_LENGTH 32
++#define SSID_MAX_LENGTH 32
++#define SSID_PASSWORD_MAX_LENGTH 64
++typedef int32_t HASH_CLS;
++typedef struct {
++	int32_t app_id;
++	int8_t appkey[APPKEY_LENGTH];
++	char devid[DEVID_LENGTH];
++	HASH_CLS hashval;
++} __attribute__ ((packed)) espush_cfg_s;;
++
++
++
++/*
++ * 平台连接状态，所有ENUM仅限在int8_t的范围内
++ */
++enum CONN_STATUS {
++	STATUS_CONNECTING = 0,
++	STATUS_DNS_LOOKUP = 1,
++	STATUS_CONNECTED = 2,
++	STATUS_DISCONNECTED = 3
++};
++
++
++enum SECOND_BOOT {
++	BOOT_UNKNOWN = 0,
++	BOOT_USING = 1
++};
++
++enum BOOT_APP {
++	APP_UNKNOWN = 0,
++	APP_USER1 = 1,
++	APP_USER2 = 2,
++};
++
++enum ESPUSH_CLOUD_CONN_MODE {
++	CONN_APP = 0,
++	CONN_SINGLE_DEV,
++};
++/*
++ * flash map, 2nd boot, user app
++ * flash map的值为 system_get_flash_map的值+1，0 留给 UNKNOWN
++ * 2nd boot 与 user app 使用enum，谨慎起见只有确认可以升级才给升级
++ */
++typedef struct regist_info_t {
++	int8_t flashmap;
++	int8_t second_boot;
++	int8_t boot_app;
++	int8_t _pad;
++}regist_info_s;
++
++
++/*
++ * 注册到espush平台，appid与appkey为设备分类标识，必填，其中appkey为32字节字符串格式
++ * vertype参数从 enum VERTYPE中选填，VER_AT与VER_NODEMCU为 AT固件与NodeMCU固件专用，混用可能导致错误
++ * devid参数为设备唯一识别码，可以使用芯片的chipid或自行定义，若传入NULL则忽略，系统会自动使用芯片chipid作为唯一识别码
++ * msgcb参数为收到数据的回调。
++ */
++void ICACHE_FLASH_ATTR espush_register(int32_t appid, char appkey[32], char devid[32], enum VERTYPE type, msg_cb msgcb);
++void ICACHE_FLASH_ATTR begin_espush_connect();
++/*
++ * 单设备注册
++ */
++void ICACHE_FLASH_ATTR espush_single_device_init(char* devid, enum VERTYPE type, msg_cb msgcb);
++
++/*
++ * 推送的固件注册数据初始化，参考 regist_info_s 的定义。
++ * 主要是固件 2nd boot，固件SPI_SIZE等。
++ */
++void ICACHE_FLASH_ATTR espush_init_regist_info(regist_info_s* info);
++
++
++/*
++ * 从平台断开连接，连接断开后将无法再次发送数据，也将不会再收到平台的通知，要启用平台，可重新使用push_regist重新登入。
++ */
++void ICACHE_FLASH_ATTR espush_unregister();
++
++/*
++ * 主动的数据推送
++ */
++sint8_t ICACHE_FLASH_ATTR espush_msg(int8_t* buf, int16_t len);
++sint8_t ICACHE_FLASH_ATTR espush_msg_plan(int8_t* buf, int16_t len, int32_t _timestamp);
++
++/*
++ * 或者连接状态, 参考 enum CONN_STATUS 的定义。
++ */
++sint8_t ICACHE_FLASH_ATTR espush_server_connect_status();
++
++
++//smartconfig 回调
++typedef void(*smartconfig_succ_cb)();
++void ICACHE_FLASH_ATTR espush_network_cfg_by_smartconfig();
++void ICACHE_FLASH_ATTR espush_network_cfg_by_smartconfig_with_callback(smartconfig_succ_cb fn);
++
++void ICACHE_FLASH_ATTR uart_stream(int8_t* pdata, int32_t len);
++
++void ICACHE_FLASH_ATTR show_systime();
++
++void ICACHE_FLASH_ATTR espush_set_server_host(int32_t addr);
++int32_t ICACHE_FLASH_ATTR espush_get_server_host();
++
++
++//保存espush的配置，APP_ID与  APPKEY
++void ICACHE_FLASH_ATTR save_espush_cfg(int32_t app_id, int8_t* appkey, int8_t* devid);
++sint8_t ICACHE_FLASH_ATTR read_espush_cfg(espush_cfg_s* info);
++push_config* ICACHE_FLASH_ATTR espush_get_pushcfg();
++
++/*
++ * 连接后可获得当前时间
++ * 使用unix时间戳表示
++ * 返回0 则代表还未连接
++ * 留意：连上后，再次断开，时间戳会得到保留。
++ */
++int32_t ICACHE_FLASH_ATTR get_timestamp();
++
++int8_t ICACHE_FLASH_ATTR set_gpio_edge(int8_t pin, int8_t edge);
++void ICACHE_FLASH_ATTR get_gpio_edge_to_buf(int8_t buf[12]);
++void ICACHE_FLASH_ATTR espush_set_heartbeat(int heart_sec);
++/*
++ * 调试信息开关
++ * 与os_printf唯一的区别在于可以输出时间戳
++ * 输出系统启动时间
++ */
++#define ESP_DEBUG 0
++
++
++#define LUA_DBG(fmt, ...) do {	\
++		static char __debug_str__[128] = { 0 }; 	\
++		os_sprintf(__debug_str__, fmt, ##__VA_ARGS__);	\
++		uart0_sendStr(__debug_str__);	\
++	} while(0)
++
++
++#if ESP_DEBUG
++#define ESP_DBG(fmt, ...) do {	\
++	show_systime();	\
++	os_printf(fmt, ##__VA_ARGS__);	\
++	}while(0)
++
++#else
++#define ESP_DBG
++#endif
++
++//基于AT固件的调试输出，只有128字节缓存；
++#define AT_DBG(fmt, ...) do {	\
++		static char __debug_str__[128] = { 0 }; 	\
++		os_sprintf(__debug_str__, fmt, ##__VA_ARGS__);	\
++		at_response(__debug_str__);	\
++	} while(0)
++
++
++#endif /* APP_INCLUDE_PUSH_H_ */
+diff --git a/app/include/user_modules.h b/app/include/user_modules.h
+index cbb794c..97a6b72 100644
+--- a/app/include/user_modules.h
++++ b/app/include/user_modules.h
+@@ -65,5 +65,7 @@
+ //#define LUA_USE_MODULES_WS2801
+ //#define LUA_USE_MODULES_WS2812
+ 
++#define LUA_USE_MODULES_ESPUSH
++
+ #endif  /* LUA_CROSS_COMPILER */
+ #endif	/* __USER_MODULES_H__ */
+diff --git a/app/modules/espush.c b/app/modules/espush.c
+new file mode 100644
+index 0000000..7e8105f
+--- /dev/null
++++ b/app/modules/espush.c
+@@ -0,0 +1,322 @@
++#include "espush.h"
++#include "lualib.h"
++#include "lauxlib.h"
++#include "lrotable.h"
++
++#include "module.h"
++#include "lauxlib.h"
++#include "platform.h"
++#include "cpu_esp8266.h"
++
++#include "driver/uart.h"
++
++#include <c_types.h>
++#include <osapi.h>
++
++#define MAX_SSID_LENGTH 128
++#define MAX_PWD_LENGTH 32
++
++
++
++static int push_data_recved = LUA_NOREF;
++static lua_State* gL = NULL;
++static lua_State* gL_rtstatus = NULL;
++
++
++void msg_recv(int8_t* pdata, int32_t len)
++{
++	if(!gL) {
++		ESP_DBG("pls regist first.\r\n");
++		return;
++	}
++
++	if(push_data_recved == LUA_NOREF) {
++		return;
++	}
++
++	lua_rawgeti(gL, LUA_REGISTRYINDEX, push_data_recved);
++
++	lua_pushlstring(gL, (const char*)pdata, len);
++	lua_call(gL, 1, 0);
++}
++
++/*
++ * 消息扩展协议处理器
++ */
++
++#define EXTMSG_PROC(func) \
++	static void func(int32_t cur_msgid, int8_t* buf, int32_t length)
++#define BEGIN_EXT_MAP
++#define END_EXT_MAP
++
++BEGIN_EXT_MAP
++	EXTMSG_PROC(online_editor);
++END_EXT_MAP
++
++
++typedef void (* extmsg_proc)(int32_t cur_msgid, int8_t* buf, int32_t length);
++
++enum EXT_MSG_TYPE {
++	EXT_MSG_ONLINE_EDITOR_REQ = 0x02,
++	EXT_MSG_ONLINE_EDITOR_RSP = 0x03
++};
++
++struct extmsg_cb_t {
++	enum EXT_MSG_TYPE msgtype;
++	extmsg_proc func;
++};
++
++static struct extmsg_cb_t gl_callbacks[] = {
++		{EXT_MSG_ONLINE_EDITOR_REQ, online_editor},
++};
++
++
++/*
++ * NodeMCU 在线编辑器，在线编程
++ * 公共头区域
++ */
++#include "flash_fs.h"
++static void online_editor(int32_t cur_msgid, int8_t* buf, int32_t length)
++{
++	int8_t exec_type = buf[0];
++	int8_t* content = buf + 1;
++	char out = 0;
++
++	static volatile int file_fd = FS_OPEN_OK - 1;
++	file_fd = fs_open("espush.lua", fs_mode2flag("w"));
++	if(file_fd < FS_OPEN_OK){
++		out = 1;
++		espush_rtstatus_ret_to_gateway(cur_msgid, &out, 1);
++		return;
++	}
++
++	fs_write(file_fd, content, length - 1);
++	fs_close(file_fd);
++
++	espush_rtstatus_ret_to_gateway(cur_msgid, &out, 1);
++}
++
++
++void custom_msg_func(int32_t cur_msgid, int8_t msgtype, int16_t length, int8_t* buf)
++{
++	ESP_DBG("msgid: [%d], msgtype: [%d], length: [%d], buf: [%p]\n", cur_msgid, msgtype, length, buf);
++
++	int8_t i = 0;
++	int8_t loop_length = sizeof(gl_callbacks) / sizeof(struct extmsg_cb_t);
++	for(; i != loop_length; ++i) {
++		if(msgtype == gl_callbacks[i].msgtype) {
++			gl_callbacks[i].func(cur_msgid, buf, length);
++		}
++	}
++
++	ESP_DBG("[%s] end\n", __func__);
++}
++
++
++/*
++ * 实时状态获取的回调函数
++ */
++void rtstatus_cb_func(int32_t msgid, char* key, int16_t length)
++{
++	ESP_DBG("msgid: [%d], key:[%p],[%d],[%s]\n", msgid, key, length, key);
++	if(!gL_rtstatus) {
++		//uart0_sendStr("pls regist first.\r\n");
++		return;
++	}
++
++	lua_pushlstring(gL_rtstatus, key, length);
++	lua_gettable(gL_rtstatus, LUA_REGISTRYINDEX);
++	lua_call(gL_rtstatus, 0, 1);
++	const char* result = lua_tostring(gL_rtstatus, -1);
++	ESP_DBG("result: [%p]\n", result);
++
++	espush_rtstatus_ret_to_gateway(msgid, result, lua_strlen(gL_rtstatus, -1));
++}
++
++
++typedef struct {
++	char* buf;
++	int32_t len;
++}code_laoder_s;
++
++
++const char * lua_code_loader(lua_State *L, void *data, size_t *size)
++{
++	code_laoder_s* loader = (code_laoder_s*)data;
++	if(loader->len) {
++		*size = loader->len;
++		loader->len = 0;
++		return loader->buf;
++	}
++
++	return NULL;
++}
++
++
++void remote_luafile_cb(int8_t* filebuf, int32_t len)
++{
++//	//uart0_sendStr(filebuf);
++	if(!gL) {
++		//uart0_sendStr("pls regist first.\r\n");
++		return;
++	}
++
++	code_laoder_s loader;
++	loader.buf = filebuf;
++	loader.len = len;
++	//int iRet = luaL_loadbuffer(gL, (const char*)filebuf, len, "REMOTE_LUAFILE_CMD");
++	int iRet = lua_load(gL, lua_code_loader, &loader, "REMOTE_LUAFILE_CMD");
++	if(iRet == LUA_ERRSYNTAX) {
++		//uart0_sendStr("COMPILE ERROR\r\n");
++		return;
++	} else if(iRet == LUA_ERRMEM) {
++		//uart0_sendStr("ERROR MEMORY\r\n");
++		return;
++	}
++
++	iRet = lua_pcall(gL, 0, 0, 0);
++	if(iRet) {
++		char iRetBuf[64] = { 0 };
++		os_sprintf(iRetBuf, "ERROR:[%s]\r\n", iRet, lua_tostring(gL, -1));
++		//uart0_sendStr(iRetBuf);
++		lua_pop(gL, 1);
++		return;
++	}
++}
++
++
++static int regist(lua_State* L)
++{
++	int32_t appid = luaL_checkinteger(L, 1);
++	const char* appkey = luaL_checkstring(L, 2);
++	if(!appkey || os_strlen(appkey) != 32) {
++		return luaL_error(L, "appkey arguments error");
++	}
++
++	if(espush_server_connect_status() == STATUS_CONNECTED) {
++		return luaL_error(L, "connected.");
++	}
++
++	gL = L;
++	if (lua_type(L, 3) == LUA_TFUNCTION || lua_type(L, 3) == LUA_TLIGHTFUNCTION) {
++		lua_pushvalue(L, 3);
++		if(push_data_recved != LUA_NOREF) {
++			luaL_unref(L, LUA_REGISTRYINDEX, push_data_recved);
++		}
++
++		push_data_recved = luaL_ref(L, LUA_REGISTRYINDEX);
++	}
++
++	//(uint32 appid, char appkey[32], char devid[32], enum VERTYPE type, msg_cb msgcb);
++	espush_register(appid, (char*)appkey, "NODEMCU_ANONYMOUS", VER_NODEMCU, msg_recv);
++	espush_luafile_cb(remote_luafile_cb);
++	espush_rtstatus_cb(rtstatus_cb_func);
++	espush_custom_msg_cb(custom_msg_func);
++
++	lua_pushinteger(L, 0);
++	return 1;
++}
++
++
++static int unregist(lua_State* L)
++{
++	espush_unregister();
++	luaL_unref(L, LUA_REGISTRYINDEX, push_data_recved);
++	gL = NULL;
++	push_data_recved = LUA_NOREF;
++	return 0;
++}
++
++
++static int get_status(lua_State* L)
++{
++	lua_pushinteger(L, espush_server_connect_status());
++	return 1;
++}
++
++
++static int pushmsg(lua_State* L)
++{
++	size_t msg_length = 0;
++	const char* msg = luaL_checklstring(L, 1, &msg_length);
++	sint8_t iRet = espush_msg((sint8_t*)msg, msg_length);
++
++	lua_pushinteger(L, iRet);
++	return 1;
++}
++
++
++static int set_status_flag(lua_State* L)
++{
++	const char* flag_key = luaL_checkstring(L, 1);
++	if(!flag_key || os_strlen(flag_key) <= 0) {
++		//uart0_sendStr("KEY ERROR");
++		return luaL_error(L, "appkey arguments error");
++	}
++	gL_rtstatus = L;
++	if (lua_type(L, 2) == LUA_TFUNCTION || lua_type(L, 2) == LUA_TLIGHTFUNCTION) {
++		lua_pushstring(L, flag_key);
++		lua_pushvalue(L, 2);
++		lua_settable(L, LUA_REGISTRYINDEX);
++	}
++
++	return 0;
++}
++
++
++static int smartconfig(lua_State* L)
++{
++	espush_network_cfg_by_smartconfig();
++
++	return 0;
++}
++
++
++static int set_interval(lua_State* L)
++{
++	const int32_t interval = luaL_checkinteger(L, 1);
++	espush_set_heartbeat(interval);
++
++	return 0;
++}
++
++
++static int get_cur_timestamp(lua_State* L)
++{
++	lua_pushinteger(L, get_timestamp());
++
++	return 1;
++}
++
++static int version(lua_State* L)
++{
++	lua_pushstring(L, "espush");
++
++	return 1;
++}
++
++//#define MIN_OPT_LEVEL 2
++//#include "lrodefs.h"
++//
++//
++const LUA_REG_TYPE espush_map[] = {
++	{LSTRKEY("regist"),				LFUNCVAL(regist)},
++	{LSTRKEY("unregist"),			LFUNCVAL(unregist)},
++	{LSTRKEY("get_status"), 		LFUNCVAL(get_status)},
++	{LSTRKEY("pushmsg"), 			LFUNCVAL(pushmsg)},
++	{LSTRKEY("set_status_flag"), 	LFUNCVAL(set_status_flag)},
++	{LSTRKEY("smartconfig"), 		LFUNCVAL(smartconfig)},
++	{LSTRKEY("version"), 			LFUNCVAL(version)},
++	{LSTRKEY("set_interval"), 		LFUNCVAL(set_interval)},
++	{LSTRKEY("get_timestamp"), 		LFUNCVAL(get_cur_timestamp)},
++
++	{LSTRKEY("CONNECTING"), 		LNUMVAL(STATUS_CONNECTING)},
++	{LSTRKEY("DNS_LOOKUP"), 		LNUMVAL(STATUS_DNS_LOOKUP)},
++	{LSTRKEY("CONNECTED"), 			LNUMVAL(STATUS_CONNECTED)},
++	{LSTRKEY("DISCONNECTED"), 		LNUMVAL(STATUS_DISCONNECTED)},
++
++	{ LNILKEY, LNILVAL }
++};
++
++NODEMCU_MODULE(ESPUSH, "espush", espush_map, NULL);
++
+-- 
+2.9.0.windows.1
+
